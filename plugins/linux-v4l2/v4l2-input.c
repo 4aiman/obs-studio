@@ -85,6 +85,8 @@ struct v4l2_data {
 
 	bool framerate_unchanged;
 	bool resolution_unchanged;
+	bool deactivate_when_not_showing;
+	bool active;
 	int_fast32_t dev;
 	int width;
 	int height;
@@ -295,6 +297,7 @@ static void v4l2_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "framerate", -1);
 	obs_data_set_default_int(settings, "color_range", VIDEO_RANGE_DEFAULT);
 	obs_data_set_default_bool(settings, "buffering", true);
+	obs_data_set_default_bool(settings, "deactivate_when_not_showing", true);
 	obs_data_set_default_bool(settings, "auto_reset", false);
 	obs_data_set_default_int(settings, "timeout_frames", 5);
 }
@@ -803,6 +806,8 @@ static obs_properties_t *v4l2_properties(void *vptr)
 
 	obs_properties_add_bool(props, "buffering", obs_module_text("UseBuffering"));
 
+	obs_properties_add_bool(props, "deactivate_when_not_showing", obs_module_text("DeactivateWhenNotShowing"));
+
 	obs_properties_add_bool(props, "auto_reset", obs_module_text("AutoresetOnTimeout"));
 
 	obs_properties_add_int(props, "timeout_frames", obs_module_text("FramesUntilTimeout"), 2, 120, 1);
@@ -1014,6 +1019,7 @@ static bool v4l2_settings_changed(struct v4l2_data *data, obs_data_t *settings)
 		}
 
 		res |= data->color_range != obs_data_get_int(settings, "color_range");
+		res |= data->deactivate_when_not_showing != obs_data_get_bool(settings, "deactivate_when_not_showing");
 	} else {
 		res = true;
 	}
@@ -1035,7 +1041,7 @@ static void v4l2_update(void *vptr, obs_data_t *settings)
 
 	bool needs_restart = v4l2_settings_changed(data, settings);
 
-	if (needs_restart)
+	if (needs_restart && data->active)
 		v4l2_terminate(data);
 
 	if (data->device_id)
@@ -1049,13 +1055,64 @@ static void v4l2_update(void *vptr, obs_data_t *settings)
 	data->resolution = obs_data_get_int(settings, "resolution");
 	data->framerate = obs_data_get_int(settings, "framerate");
 	data->color_range = obs_data_get_int(settings, "color_range");
+	data->deactivate_when_not_showing = obs_data_get_bool(settings, "deactivate_when_not_showing");
+	data->active = obs_data_get_bool(settings, "active") || !data->deactivate_when_not_showing;
 	data->auto_reset = obs_data_get_bool(settings, "auto_reset");
 	data->timeout_frames = obs_data_get_int(settings, "timeout_frames");
 
 	v4l2_update_source_flags(data, settings);
 
-	if (needs_restart)
+	if (needs_restart && data->active) {
 		v4l2_init(data);
+		obs_data_set_bool(settings, "active", true);
+	}
+}
+
+/**
+ * Handle hide of input
+ */
+static void v4l2_hide(void *vptr)
+{
+
+	V4L2_DATA(vptr);
+
+	blog(LOG_INFO, "Disabling camera: %s", data->device_id);
+
+	if (data->active) {
+		if (data->deactivate_when_not_showing) {
+			v4l2_terminate(data);
+			obs_source_output_video(data->source, NULL);
+		}
+
+		obs_data_t *settings;
+		settings = obs_source_get_settings(data->source);
+		obs_data_set_bool(settings, "active", false);
+		obs_data_release(settings);
+
+		data->active = false;
+	}
+}
+
+/**
+ * Handle show of input
+ */
+static void v4l2_show(void *vptr)
+{
+
+	V4L2_DATA(vptr);
+
+	blog(LOG_INFO, "Enabling camera: %s", data->device_id);
+
+	if (!data->active) {
+		v4l2_init(data);
+
+		obs_data_t *settings;
+		settings = obs_source_get_settings(data->source);
+		obs_data_set_bool(settings, "active", true);
+		obs_data_release(settings);
+
+		data->active = true;
+	}
 }
 
 static void *v4l2_create(obs_data_t *settings, obs_source_t *source)
@@ -1065,6 +1122,8 @@ static void *v4l2_create(obs_data_t *settings, obs_source_t *source)
 	data->source = source;
 	data->resolution_unchanged = false;
 	data->framerate_unchanged = false;
+	data->active = true;
+	data->deactivate_when_not_showing = true;
 
 	/* Bitch about build problems ... */
 #ifndef V4L2_CAP_DEVICE_CAPS
@@ -1097,6 +1156,8 @@ struct obs_source_info v4l2_input = {
 	.create = v4l2_create,
 	.destroy = v4l2_destroy,
 	.update = v4l2_update,
+	.hide = v4l2_hide,
+	.show = v4l2_show,
 	.get_defaults = v4l2_defaults,
 	.get_properties = v4l2_properties,
 	.icon_type = OBS_ICON_TYPE_CAMERA,
